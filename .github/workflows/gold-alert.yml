@@ -1,0 +1,109 @@
+name: gold-price-alert
+
+on:
+  schedule:
+    # Every 15 minutes (safer for Jisu free tier: ~100 calls/day).
+    # Offset from :00 to reduce Actions queue delay.
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_notify:
+        description: "Ignore cooldown and notify if thresholds hit"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gold-price-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore alert state cache
+        uses: actions/cache@v4
+        with:
+          path: state
+          # Unique key each run so updated cooldown state can be saved.
+          key: gold-alert-state-${{ github.run_number }}
+          restore-keys: |
+            gold-alert-state-
+
+      - name: Check gold price and notify
+        env:
+          # Domestic API key (极速数据)
+          JISU_APPKEY: ${{ secrets.JISU_APPKEY }}
+
+          # Market: shgold | bank | london | shfutures | hkgold
+          GOLD_MARKET: ${{ vars.GOLD_MARKET }}
+          # Symbol example for shgold: Au99.99 / Au9999 / Au(T+D) / 黄金延期
+          GOLD_SYMBOL: ${{ vars.GOLD_SYMBOL }}
+
+          # Thresholds in CNY/g for shgold/bank (same unit as API price)
+          GOLD_LOW: ${{ vars.GOLD_LOW }}
+          GOLD_HIGH: ${{ vars.GOLD_HIGH }}
+
+          # Hours between identical-side alerts
+          COOLDOWN_HOURS: ${{ vars.COOLDOWN_HOURS }}
+
+          # Notification channels (configure at least one)
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+
+          STATE_PATH: state/last_alert.json
+          FORCE_NOTIFY: ${{ inputs.force_notify || 'false' }}
+        run: |
+          set -euo pipefail
+          mkdir -p state
+
+          export GOLD_MARKET="${GOLD_MARKET:-shgold}"
+          export GOLD_SYMBOL="${GOLD_SYMBOL:-Au99.99}"
+          export COOLDOWN_HOURS="${COOLDOWN_HOURS:-3}"
+
+          if [ "${FORCE_NOTIFY}" = "true" ]; then
+            export COOLDOWN_HOURS="0"
+          fi
+
+          if [ -z "${JISU_APPKEY:-}" ]; then
+            echo "Set repository Secret JISU_APPKEY (https://www.jisuapi.com/)"
+            exit 1
+          fi
+
+          if [ -z "${GOLD_LOW:-}" ] && [ -z "${GOLD_HIGH:-}" ]; then
+            echo "Set repository Variables GOLD_LOW and/or GOLD_HIGH (CNY/g)"
+            exit 1
+          fi
+
+          python scripts/check_gold.py
+
+      - name: Show state
+        if: always()
+        run: |
+          if [ -f state/last_alert.json ]; then
+            echo "----- state/last_alert.json -----"
+            cat state/last_alert.json
+          else
+            echo "No state file written"
+          fi

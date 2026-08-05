@@ -1,0 +1,82 @@
+# 手动测试用：Actions → test-gold → Run workflow
+# 推荐先用 mode=dry_run（只取价、不发通知）
+name: test-gold
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry_run=只取价不通知；notify=阈值命中则真发邮件/企微"
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - notify
+      gold_low:
+        description: "低价阈值（元/克）。dry_run 可填很大数故意触发预览"
+        required: false
+        default: "9999"
+      gold_high:
+        description: "高价阈值（元/克），可留空"
+        required: false
+        default: ""
+      gold_symbol:
+        description: "品种，如 Au99.99 / Au9999 / Au(T+D)"
+        required: false
+        default: "Au99.99"
+      gold_market:
+        description: "市场：shgold / bank / london / shfutures / hkgold"
+        required: false
+        default: "shgold"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run gold check
+        env:
+          JISU_APPKEY: ${{ secrets.JISU_APPKEY }}
+          GOLD_MARKET: ${{ inputs.gold_market }}
+          GOLD_SYMBOL: ${{ inputs.gold_symbol }}
+          GOLD_LOW: ${{ inputs.gold_low }}
+          GOLD_HIGH: ${{ inputs.gold_high }}
+          COOLDOWN_HOURS: "0"
+          DRY_RUN: ${{ inputs.mode == 'dry_run' && 'true' || 'false' }}
+          # notify 模式才需要下面这些 Secret（至少配一种）
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          STATE_PATH: state/last_alert.json
+        run: |
+          set -euo pipefail
+          mkdir -p state
+
+          if [ -z "${JISU_APPKEY:-}" ]; then
+            echo "::error::请先在仓库 Settings → Secrets → Actions 添加 Secret: JISU_APPKEY"
+            echo "注册地址: https://www.jisuapi.com/"
+            exit 1
+          fi
+
+          echo "mode=${{ inputs.mode }}"
+          echo "market=${GOLD_MARKET} symbol=${GOLD_SYMBOL}"
+          echo "low=${GOLD_LOW:-<empty>} high=${GOLD_HIGH:-<empty>}"
+          echo "DRY_RUN=${DRY_RUN}"
+
+          python scripts/check_gold.py
