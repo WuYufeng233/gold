@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import smtplib
@@ -13,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
@@ -194,17 +196,18 @@ def cooldown_active(state: dict[str, Any], side: str) -> bool:
     return elapsed < COOLDOWN_HOURS * 3600
 
 
-def notify(title: str, content: str) -> list[str]:
+def notify(alert: dict[str, str]) -> list[str]:
     sent: list[str] = []
+    title = alert["title"]
 
     wecom = os.environ.get("WECOM_WEBHOOK", "").strip()
     if wecom:
-        send_wecom(wecom, title, content)
+        send_wecom(wecom, title, alert["markdown"])
         sent.append("wecom")
 
     pushplus = os.environ.get("PUSHPLUS_TOKEN", "").strip()
     if pushplus:
-        send_pushplus(pushplus, title, content)
+        send_pushplus(pushplus, title, alert["html"])
         sent.append("pushplus")
 
     smtp_host = os.environ.get("SMTP_HOST", "").strip()
@@ -212,7 +215,15 @@ def notify(title: str, content: str) -> list[str]:
     smtp_pass = os.environ.get("SMTP_PASS", "").strip()
     smtp_to = os.environ.get("SMTP_TO", "").strip() or smtp_user
     if smtp_host and smtp_user and smtp_pass and smtp_to:
-        send_email(smtp_host, smtp_user, smtp_pass, smtp_to, title, content)
+        send_email(
+            smtp_host,
+            smtp_user,
+            smtp_pass,
+            smtp_to,
+            title,
+            alert["text"],
+            alert["html"],
+        )
         sent.append("email")
 
     if not sent:
@@ -223,21 +234,21 @@ def notify(title: str, content: str) -> list[str]:
     return sent
 
 
-def send_wecom(webhook: str, title: str, content: str) -> None:
+def send_wecom(webhook: str, title: str, markdown: str) -> None:
     payload = {
         "msgtype": "markdown",
         "markdown": {
-            "content": f"### {title}\n{content}",
+            "content": f"### {title}\n{markdown}",
         },
     }
     post_json(webhook, payload)
 
 
-def send_pushplus(token: str, title: str, content: str) -> None:
+def send_pushplus(token: str, title: str, html_body: str) -> None:
     payload = {
         "token": token,
         "title": title,
-        "content": content.replace("\n", "<br>"),
+        "content": html_body,
         "template": "html",
     }
     post_json("https://www.pushplus.plus/send", payload)
@@ -249,13 +260,16 @@ def send_email(
     password: str,
     to_addr: str,
     title: str,
-    content: str,
+    text_body: str,
+    html_body: str,
 ) -> None:
     port = int(os.environ.get("SMTP_PORT", "465"))
-    msg = MIMEText(content, "plain", "utf-8")
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = title
     msg["From"] = user
     msg["To"] = to_addr
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     context = ssl.create_default_context()
     if port == 465:
@@ -302,40 +316,137 @@ def post_json(url: str, payload: dict[str, Any]) -> None:
             raise RuntimeError(f"PushPlus error: {data}")
 
 
-def format_message(
+def build_alert(
     *,
     side: str,
     quote: dict[str, Any],
     low: float | None,
     high: float | None,
-) -> tuple[str, str]:
+) -> dict[str, str]:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    direction = "跌破低价" if side == "low" else "突破高价"
+    is_low = side == "low"
+    direction = "跌破低价" if is_low else "突破高价"
     symbol_label = quote["symbol_name"] or quote["symbol"]
-    title = (
-        f"金价提醒：{symbol_label} {direction}"
-        f"（{quote['price']:.2f} {quote['unit']}）"
-    )
+    price_text = f"{quote['price']:.2f}"
+    unit = quote["unit"]
+    title = f"金价提醒：{symbol_label} {direction}（{price_text} {unit}）"
 
-    lines = [
-        f"**方向**: {direction}",
-        f"**品种**: {quote['symbol']} / {symbol_label}",
-        f"**当前价**: {quote['price']:.2f} {quote['unit']}",
-        f"**市场**: {quote['market']}",
-        f"**数据源**: {quote['source']}",
-        f"**上游更新**: {quote.get('updated_at') or 'n/a'}",
-        f"**检查时间**: {now}",
+    rows: list[tuple[str, str]] = [
+        ("方向", direction),
+        ("品种", f"{quote['symbol']} / {symbol_label}"),
+        ("当前价", f"{price_text} {unit}"),
+        ("市场", str(quote["market"])),
+        ("数据源", str(quote["source"])),
+        ("上游更新", str(quote.get("updated_at") or "n/a")),
+        ("检查时间", now),
     ]
     if low is not None:
-        lines.append(f"**低价阈值**: {low:.2f} {quote['unit']}")
+        rows.append(("低价阈值", f"{low:.2f} {unit}"))
     if high is not None:
-        lines.append(f"**高价阈值**: {high:.2f} {quote['unit']}")
+        rows.append(("高价阈值", f"{high:.2f} {unit}"))
     if quote.get("buy") is not None and quote.get("sell") is not None:
-        lines.append(f"**买/卖**: {quote['buy']:.2f} / {quote['sell']:.2f}")
+        rows.append(("买 / 卖", f"{quote['buy']:.2f} / {quote['sell']:.2f}"))
     if quote.get("changepercent"):
-        lines.append(f"**涨跌幅**: {quote['changepercent']}")
+        rows.append(("涨跌幅", str(quote["changepercent"])))
 
-    return title, "\n".join(lines)
+    markdown = "\n".join(f"**{k}**: {v}" for k, v in rows)
+    text = "\n".join(f"{k}: {v}" for k, v in rows)
+    html_body = render_email_html(
+        title=title,
+        direction=direction,
+        is_low=is_low,
+        symbol_label=symbol_label,
+        price_text=price_text,
+        unit=unit,
+        rows=rows,
+    )
+    return {
+        "title": title,
+        "markdown": markdown,
+        "text": text,
+        "html": html_body,
+    }
+
+
+def render_email_html(
+    *,
+    title: str,
+    direction: str,
+    is_low: bool,
+    symbol_label: str,
+    price_text: str,
+    unit: str,
+    rows: list[tuple[str, str]],
+) -> str:
+    # Email-safe inline styles + table layout for 163/QQ clients.
+    accent = "#0f766e" if is_low else "#b45309"
+    badge_bg = "#ecfdf5" if is_low else "#fff7ed"
+    badge_fg = "#047857" if is_low else "#c2410c"
+    tip = "可能适合关注买入机会" if is_low else "可能适合关注卖出/止盈机会"
+
+    detail_rows = []
+    for label, value in rows:
+        detail_rows.append(
+            "<tr>"
+            f'<td style="padding:10px 0;border-bottom:1px solid #eee;'
+            f'color:#6b7280;font-size:13px;width:96px;">{html.escape(label)}</td>'
+            f'<td style="padding:10px 0;border-bottom:1px solid #eee;'
+            f'color:#111827;font-size:14px;font-weight:600;text-align:right;">'
+            f"{html.escape(value)}</td>"
+            "</tr>"
+        )
+
+    return f"""\
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{html.escape(title)}</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,0.08);">
+          <tr>
+            <td style="background:linear-gradient(135deg,{accent} 0%,#111827 100%);padding:28px 28px 22px 28px;color:#ffffff;">
+              <div style="font-size:12px;letter-spacing:0.08em;opacity:0.85;text-transform:uppercase;">GOLD PRICE ALERT</div>
+              <div style="font-size:22px;font-weight:700;margin-top:8px;line-height:1.35;">{html.escape(symbol_label)} · {html.escape(direction)}</div>
+              <div style="margin-top:14px;">
+                <span style="display:inline-block;background:{badge_bg};color:{badge_fg};border-radius:999px;padding:6px 12px;font-size:12px;font-weight:700;">
+                  {html.escape(direction)}
+                </span>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:28px;">
+              <div style="text-align:center;padding:8px 0 20px 0;">
+                <div style="color:#6b7280;font-size:13px;margin-bottom:6px;">当前价格</div>
+                <div style="font-size:40px;line-height:1.1;font-weight:800;color:#111827;letter-spacing:-0.02em;">
+                  {html.escape(price_text)}
+                  <span style="font-size:16px;font-weight:600;color:#6b7280;margin-left:4px;">{html.escape(unit)}</span>
+                </div>
+                <div style="margin-top:10px;color:#9ca3af;font-size:12px;">{html.escape(tip)}</div>
+              </div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">
+                {"".join(detail_rows)}
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 28px 24px 28px;background:#fafafa;color:#9ca3af;font-size:12px;line-height:1.6;">
+              本邮件由 gold-price GitHub Actions 自动发送，仅供参考，不构成投资建议。
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
 
 
 def main() -> int:
@@ -380,22 +491,26 @@ def main() -> int:
         save_state(state)
         return 0
 
-    title, content = format_message(side=side, quote=quote, low=low, high=high)
+    alert = build_alert(side=side, quote=quote, low=low, high=high)
     dry_run = os.environ.get("DRY_RUN", "").strip().lower() in {"1", "true", "yes"}
     if dry_run:
         print("DRY_RUN=true; skip notify. Would send:")
-        print(f"TITLE: {title}")
-        print(content)
+        print(f"TITLE: {alert['title']}")
+        print(alert["text"])
+        preview = Path("state/email_preview.html")
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        preview.write_text(alert["html"], encoding="utf-8")
+        print(f"HTML preview written to {preview}")
         save_state(state)
         return 0
 
-    channels = notify(title, content)
+    channels = notify(alert)
     print(f"Alert sent via: {', '.join(channels)}")
 
     state["last_side"] = side
     state["last_alert_ts"] = time.time()
     state["last_alert_at"] = datetime.now(timezone.utc).isoformat()
-    state["last_alert_title"] = title
+    state["last_alert_title"] = alert["title"]
     save_state(state)
     return 0
 
