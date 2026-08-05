@@ -1,0 +1,26 @@
+# 用途：只验证 GitHub Actions 的 schedule 会不会触发（不取金价、不发邮件）
+# 用完请删除本文件，避免一直空跑占用 Actions 分钟数
+name: schedule-smoke
+
+on:
+  schedule:
+    # 尽量每分钟触发一次（快速测试用）
+    # 注意：GitHub 官方最短可靠间隔约 5 分钟，* * * * * 常被合并/跳过，
+    # 实际可能接近每 5 分钟一次；测通后请删掉本文件
+    - cron: "* * * * *"
+  # 方便立刻验证 workflow 本身能跑
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hello from schedule
+        run: |
+          echo "OK: workflow ran"
+          echo "event=${{ github.event_name }}"
+          echo "UTC time: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "If event=schedule, cron trigger works."
