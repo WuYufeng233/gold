@@ -57,27 +57,24 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def in_sge_trading_session(now: datetime | None = None) -> bool:
-    """上海黄金交易所常规时段（北京时间，不含节假日特例）。
+def in_trading_session(now: datetime | None = None) -> bool:
+    """招商银行积存金交易时段（北京时间，不含法定节假日特例）。
 
-    日盘：周一至周五 09:00-15:30
-    夜盘：周一至周五 20:00-次日 02:30（周五夜盘落到周六凌晨）
+    交易日（周一至周五开盘）：09:10 — 次日 02:00
+    周五开到周六 02:00；02:00-09:10 闭市；周末其余时间停盘
     """
     now = now.astimezone(CN_TZ) if now else datetime.now(CN_TZ)
     weekday = now.weekday()  # Mon=0 ... Sun=6
     t = now.time()
 
-    day_open, day_close = dt_time(9, 0), dt_time(15, 30)
-    night_open, night_close = dt_time(20, 0), dt_time(2, 30)
+    session_open = dt_time(9, 10)
+    session_close = dt_time(2, 0)  # 次日 02:00 起不可交易
 
-    # 日盘：周一至周五
-    if weekday <= 4 and day_open <= t <= day_close:
+    # 周一至周五 09:10 之后（含当晚至 23:59）
+    if weekday <= 4 and t >= session_open:
         return True
-    # 夜盘晚间：周一至周五 20:00 后
-    if weekday <= 4 and t >= night_open:
-        return True
-    # 夜盘凌晨：周二至周六 02:30 前（承接前一晚）
-    if 1 <= weekday <= 5 and t <= night_close:
+    # 周二至周六 00:00 至 02:00 前（承接前一交易日；周五盘落到周六凌晨）
+    if 1 <= weekday <= 5 and t < session_close:
         return True
     return False
 
@@ -493,9 +490,9 @@ def main() -> int:
     if low is not None and high is not None and low > high:
         raise SystemExit("GOLD_LOW must be <= GOLD_HIGH")
 
-    if env_bool("ONLY_TRADING_HOURS") and not in_sge_trading_session():
+    if env_bool("ONLY_TRADING_HOURS") and not in_trading_session():
         now_cn = datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-        print(f"Outside SGE trading hours ({now_cn}); skip API call.")
+        print(f"Outside CMB gold trading hours ({now_cn}); skip API call.")
         return 0
 
     quote = fetch_jisu_price()
