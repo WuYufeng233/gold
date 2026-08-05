@@ -2,9 +2,20 @@ name: gold-price-alert
 
 on:
   schedule:
-    # Every 15 minutes (safer for Jisu free tier: ~100 calls/day).
-    # Offset from :00 to reduce Actions queue delay.
-    - cron: "7,22,37,52 * * * *"
+    # 上金所交易时段（北京时间），每 15 分钟一次（:07/:22/:37/:52，避开整点排队）
+    # 日盘 09:00-15:30（周一至周五）
+    - cron: "7,22,37,52 9-14 * * 1-5"
+      timezone: Asia/Shanghai
+    - cron: "7,22 15 * * 1-5"
+      timezone: Asia/Shanghai
+    # 夜盘晚间 20:00-23:59（周一至周五）
+    - cron: "7,22,37,52 20-23 * * 1-5"
+      timezone: Asia/Shanghai
+    # 夜盘凌晨 00:00-02:30（周二至周六，承接前一晚夜盘；周五夜盘落到周六凌晨）
+    - cron: "7,22,37,52 0-1 * * 2-6"
+      timezone: Asia/Shanghai
+    - cron: "7,22 2 * * 2-6"
+      timezone: Asia/Shanghai
   workflow_dispatch:
     inputs:
       force_notify:
@@ -30,15 +41,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Restore alert state cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: state
           # Unique key each run so updated cooldown state can be saved.
@@ -74,6 +85,8 @@ jobs:
 
           STATE_PATH: state/last_alert.json
           FORCE_NOTIFY: ${{ inputs.force_notify || 'false' }}
+          # 定时任务只在交易时段打 API；手动 Run 不受限
+          ONLY_TRADING_HOURS: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p state

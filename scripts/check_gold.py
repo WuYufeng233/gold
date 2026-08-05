@@ -13,11 +13,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+CN_TZ = ZoneInfo("Asia/Shanghai")
 
 # 极速数据：https://www.jisuapi.com/api/gold/
 JISU_ENDPOINTS = {
@@ -45,6 +48,38 @@ def env_float(name: str, default: float | None = None) -> float | None:
     if not raw:
         return default
     return float(raw)
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def in_sge_trading_session(now: datetime | None = None) -> bool:
+    """上海黄金交易所常规时段（北京时间，不含节假日特例）。
+
+    日盘：周一至周五 09:00-15:30
+    夜盘：周一至周五 20:00-次日 02:30（周五夜盘落到周六凌晨）
+    """
+    now = now.astimezone(CN_TZ) if now else datetime.now(CN_TZ)
+    weekday = now.weekday()  # Mon=0 ... Sun=6
+    t = now.time()
+
+    day_open, day_close = dt_time(9, 0), dt_time(15, 30)
+    night_open, night_close = dt_time(20, 0), dt_time(2, 30)
+
+    # 日盘：周一至周五
+    if weekday <= 4 and day_open <= t <= day_close:
+        return True
+    # 夜盘晚间：周一至周五 20:00 后
+    if weekday <= 4 and t >= night_open:
+        return True
+    # 夜盘凌晨：周二至周六 02:30 前（承接前一晚）
+    if 1 <= weekday <= 5 and t <= night_close:
+        return True
+    return False
 
 
 def http_get_json(url: str) -> Any:
@@ -457,6 +492,11 @@ def main() -> int:
 
     if low is not None and high is not None and low > high:
         raise SystemExit("GOLD_LOW must be <= GOLD_HIGH")
+
+    if env_bool("ONLY_TRADING_HOURS") and not in_sge_trading_session():
+        now_cn = datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+        print(f"Outside SGE trading hours ({now_cn}); skip API call.")
+        return 0
 
     quote = fetch_jisu_price()
     print(
